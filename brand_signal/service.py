@@ -18,7 +18,7 @@ class Service:
     def __init__(self, store: Store):
         self.store = store
 
-    def validate_open(self, db, event: dict) -> dict:
+    def validate_open(self, db, event: dict, supersede_revoked: bool = False) -> dict:
         require(isinstance(event, dict), "invalid_ticket", "ticket object required")
         ticket_id = event.get("id")
         device_id = event.get("device_id")
@@ -28,11 +28,30 @@ class Service:
         Catalog.device(db, device_id, opened)
         severity = event.get("severity", "normal")
         require(severity in SEVERITIES, "invalid_severity", "severity unknown")
-        require(not db.execute("SELECT 1 FROM tickets WHERE id=?", (ticket_id,)).fetchone(), "ticket_exists", "ticket id exists", 409)
+        existing = db.execute("SELECT state FROM tickets WHERE id=?", (ticket_id,)).fetchone()
+        if existing is not None:
+            require(existing["state"] == "revoked" and supersede_revoked, "ticket_exists", "ticket id exists", 409)
         return {"id": ticket_id, "device_id": device_id, "opened_at": opened, "severity": severity}
 
-    def accept_open(self, db, event: dict, batch_id: str) -> dict:
-        data = self.validate_open(db, event)
+    def accept_open(self, db, event: dict, batch_id: str, supersede_revoked: bool = False) -> dict:
+        data = self.validate_open(db, event, supersede_revoked)
+        existing = db.execute("SELECT * FROM tickets WHERE id=?", (data["id"],)).fetchone()
+        if existing is not None:
+            # 修正重放：仅允许取代同一业务键下已撤销的记录，活跃记录仍按冲突拒收。
+            require(existing["state"] == "revoked" and supersede_revoked, "ticket_exists", "ticket id exists", 409)
+            next_revision = existing["revision"] + 1
+            db.execute(
+                "UPDATE tickets SET device_id=?,opened_at=?,severity=?,state='open',closed_at=NULL,revision=?,origin_batch=? WHERE id=?",
+                (data["device_id"], data["opened_at"], data["severity"], next_revision, batch_id, data["id"]),
+            )
+            db.execute(
+                "INSERT INTO ticket_history VALUES(?,?,?,?,?,?)",
+                (data["id"], next_revision, data["opened_at"], "reopen", "open", "correction_replay"),
+            )
+            db.execute("UPDATE ticket_revocations SET status='superseded' WHERE ticket_id=?", (data["id"],))
+            revision = self.store.bump(db)
+            self.store.audit(db, "ticket_replayed", data["id"], {"device": data["device_id"], "batch": batch_id, "source_revision": revision})
+            return {**data, "state": "open", "revision": next_revision}
         db.execute("INSERT INTO tickets(id,device_id,opened_at,severity,state,origin_batch) VALUES(?,?,?,?,?,?)", (data["id"], data["device_id"], data["opened_at"], data["severity"], "open", batch_id))
         db.execute("INSERT INTO ticket_history VALUES(?,?,?,?,?,?)", (data["id"], 1, data["opened_at"], "open", "open", ""))
         revision = self.store.bump(db)
@@ -45,6 +64,7 @@ class Service:
         with self.store.transaction() as db:
             row = db.execute("SELECT * FROM tickets WHERE id=?", (ticket_id,)).fetchone()
             require(row is not None, "unknown_ticket", "ticket unknown", 404)
+            require(row["state"] != "revoked", "ticket_revoked", "ticket was revoked as an invalid source", 409)
             require(row["revision"] == expected_revision, "stale_ticket", "ticket revision changed", 409)
             target = TRANSITIONS[row["state"]].get(action)
             require(target is not None, "invalid_transition", "action unavailable in current state", 409)
@@ -69,4 +89,4 @@ class Service:
     def list_for_device(self, device_id: str) -> list[dict]:
         with self.store.read() as db:
             Catalog.device(db, device_id)
-            return [dict(row) for row in db.execute("SELECT * FROM tickets WHERE device_id=? ORDER BY opened_at,id", (device_id,))]
+            return [dict(row) for row in db.execute("SELECT t.* FROM tickets t LEFT JOIN ticket_revocations r ON r.ticket_id=t.id AND r.status='active' WHERE t.device_id=? AND r.ticket_id IS NULL ORDER BY t.opened_at,t.id", (device_id,))]

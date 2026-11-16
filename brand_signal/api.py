@@ -24,6 +24,7 @@ from .lineage import Lineage
 from .rollups import Rollups
 from .sampling import Sampling
 from .mappings import Mappings
+from .revocations import Revocations
 
 
 class MarketIn(BaseModel):
@@ -51,6 +52,13 @@ class RetireIn(BaseModel):
 class BatchIn(BaseModel):
     request_key: str
     rows: list[dict | list | str | int | float | None]
+    corrects: str | None = None
+
+
+class RevokeIn(BaseModel):
+    reason_code: str
+    reason: str
+    idempotency_key: str
 
 
 class TransitionIn(BaseModel):
@@ -163,6 +171,7 @@ def create_app(path: str | None = None) -> FastAPI:
     rollups = Rollups(db)
     sampling = Sampling(db)
     mappings = Mappings(db)
+    revocations = Revocations(db)
     app = FastAPI(title="Brand Signal Service Analytics", version="1.0")
     app.state.store = db
 
@@ -200,7 +209,23 @@ def create_app(path: str | None = None) -> FastAPI:
 
     @app.post("/ingest/{source}")
     def ingest(source: str, body: BatchIn):
-        return intake.submit(source, body.request_key, body.rows)
+        return intake.submit(source, body.request_key, body.rows, body.corrects)
+
+    @app.post("/batches/{batch_id}/revoke")
+    def revoke_batch(batch_id: str, body: RevokeIn):
+        return revocations.revoke(batch_id, body.reason_code, body.reason, body.idempotency_key)
+
+    @app.get("/batches/{batch_id}/revocation")
+    def batch_revocation(batch_id: str):
+        return revocations.get_for_batch(batch_id)
+
+    @app.get("/revocations/{revocation_id}")
+    def revocation(revocation_id: str):
+        return revocations.get(revocation_id)
+
+    @app.get("/tickets/{ticket_id}/revocation")
+    def ticket_revocation(ticket_id: str):
+        return revocations.list_for_ticket(ticket_id)
 
     @app.get("/batches/{batch_id}")
     def batch(batch_id: str):

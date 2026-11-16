@@ -21,10 +21,14 @@ class Lineage:
             ids = [row["id"] for row in devices]
             source_rows = []
             for device in ids:
-                for table, timestamp in (("tickets", "opened_at"), ("telemetry", "observed_at")):
-                    for row in db.execute(f"SELECT * FROM {table} WHERE device_id=? ORDER BY {timestamp},id", (device,)):
-                        if market_day(row[timestamp], zone) == day:
-                            source_rows.append({"source": table, "id": row["id"], "device_id": device, "origin_batch": row["origin_batch"], "at": row[timestamp]})
+                ticket_rows = db.execute("SELECT t.*,r.revocation_id AS revoked_in,r.status AS revocation_status FROM tickets t LEFT JOIN ticket_revocations r ON r.ticket_id=t.id WHERE t.device_id=? ORDER BY t.opened_at,t.id", (device,)).fetchall()
+                for row in ticket_rows:
+                    if market_day(row["opened_at"], zone) == day:
+                        source_rows.append({"source": "tickets", "id": row["id"], "device_id": device, "origin_batch": row["origin_batch"], "at": row["opened_at"], "revoked": row["revoked_in"] is not None, "revocation_active": row["revocation_status"] == "active"})
+                meter_rows = db.execute("SELECT e.*,x.revocation_id AS revoked_in,x.status AS revocation_status FROM telemetry e LEFT JOIN telemetry_revocations x ON x.event_id=e.id WHERE e.device_id=? ORDER BY e.observed_at,e.id", (device,)).fetchall()
+                for row in meter_rows:
+                    if market_day(row["observed_at"], zone) == day:
+                        source_rows.append({"source": "telemetry", "id": row["id"], "device_id": device, "origin_batch": row["origin_batch"], "at": row["observed_at"], "revoked": row["revoked_in"] is not None, "revocation_active": row["revocation_status"] == "active"})
             history = []
             for row in source_rows:
                 if row["source"] != "tickets":
@@ -40,4 +44,6 @@ class Lineage:
             rows = [dict(r) for r in db.execute("SELECT * FROM batch_rows WHERE batch_id=? ORDER BY row_no", (batch_id,))]
             for row in rows:
                 row["payload"] = json.loads(row["payload"])
-            return {"batch": dict(batch), "rows": rows}
+            revocation = db.execute("SELECT * FROM revocations WHERE batch_id=?", (batch_id,)).fetchone()
+            corrected_by = db.execute("SELECT id,request_key,status,created_at FROM batches WHERE corrects=? ORDER BY created_at", (batch_id,)).fetchall()
+            return {"batch": dict(batch), "rows": rows, "revocation": dict(revocation) if revocation else None, "corrected_by": [dict(r) for r in corrected_by]}

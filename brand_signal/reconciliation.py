@@ -22,12 +22,12 @@ class Reconciliation:
             issues = []
             devices = {r["id"]: r for r in db.execute("SELECT * FROM devices WHERE market=?", (market,))}
             meters = defaultdict(list)
-            for row in db.execute("SELECT e.* FROM telemetry e JOIN devices d ON d.id=e.device_id WHERE d.market=?", (market,)):
+            for row in db.execute("SELECT e.* FROM telemetry e JOIN devices d ON d.id=e.device_id LEFT JOIN telemetry_revocations x ON x.event_id=e.id AND x.status='active' WHERE d.market=? AND x.event_id IS NULL", (market,)):
                 local = market_day(row["observed_at"], zone[0])
                 if local in valid_days:
                     meters[(row["device_id"], local)].append(row)
             cases = defaultdict(list)
-            for row in db.execute("SELECT t.* FROM tickets t JOIN devices d ON d.id=t.device_id WHERE d.market=?", (market,)):
+            for row in db.execute("SELECT t.* FROM tickets t JOIN devices d ON d.id=t.device_id LEFT JOIN ticket_revocations r ON r.ticket_id=t.id AND r.status='active' WHERE d.market=? AND r.ticket_id IS NULL", (market,)):
                 local = market_day(row["opened_at"], zone[0])
                 if local in valid_days:
                     cases[(row["device_id"], local)].append(row)

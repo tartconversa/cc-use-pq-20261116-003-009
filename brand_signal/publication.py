@@ -43,6 +43,14 @@ class Publication:
             output["current_source_revision"] = self.store.revision(db)
             output["current_head"] = self.head(db, row["market"])
             output["ready"] = (output["status"] == "prepared" and output["source_revision"] == output["current_source_revision"] and output["expected_head"] == output["current_head"])
+            # 显式标注失效原因：撤销/重放会推进源修订，使未发布候选识别为源修订失效。
+            output["invalid_reasons"] = []
+            if output["status"] != "prepared":
+                output["invalid_reasons"].append("candidate_" + output["status"])
+            if output["source_revision"] != output["current_source_revision"]:
+                output["invalid_reasons"].append("source_revision_superseded")
+            if output["expected_head"] != output["current_head"]:
+                output["invalid_reasons"].append("head_superseded")
             return output
 
     def discard(self, candidate_id: str) -> dict:

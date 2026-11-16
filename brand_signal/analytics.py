@@ -35,9 +35,9 @@ class Analytics:
         days = list(days_between(from_day, to_day))
         devices = db.execute("SELECT * FROM devices WHERE market=? ORDER BY id", (market,)).fetchall()
         products = [row["code"] for row in db.execute("SELECT code FROM products ORDER BY code")]
-        tickets = db.execute("SELECT t.* FROM tickets t JOIN devices d ON d.id=t.device_id WHERE d.market=? ORDER BY t.id", (market,)).fetchall()
-        history = db.execute("SELECT h.* FROM ticket_history h JOIN tickets t ON t.id=h.ticket_id JOIN devices d ON d.id=t.device_id WHERE d.market=? ORDER BY h.ticket_id,h.revision", (market,)).fetchall()
-        telemetry = db.execute("SELECT e.* FROM telemetry e JOIN devices d ON d.id=e.device_id WHERE d.market=? ORDER BY e.id", (market,)).fetchall()
+        tickets = db.execute("SELECT t.* FROM tickets t JOIN devices d ON d.id=t.device_id LEFT JOIN ticket_revocations r ON r.ticket_id=t.id AND r.status='active' WHERE d.market=? AND r.ticket_id IS NULL ORDER BY t.id", (market,)).fetchall()
+        history = db.execute("SELECT h.* FROM ticket_history h JOIN tickets t ON t.id=h.ticket_id JOIN devices d ON d.id=t.device_id LEFT JOIN ticket_revocations r ON r.ticket_id=t.id AND r.status='active' WHERE d.market=? AND r.ticket_id IS NULL ORDER BY h.ticket_id,h.revision", (market,)).fetchall()
+        telemetry = db.execute("SELECT e.* FROM telemetry e JOIN devices d ON d.id=e.device_id LEFT JOIN telemetry_revocations x ON x.event_id=e.id AND x.status='active' WHERE d.market=? AND x.event_id IS NULL ORDER BY e.id", (market,)).fetchall()
         group = {}
         for day in days:
             for product in products:
@@ -117,7 +117,7 @@ class Analytics:
             require(db.execute("SELECT 1 FROM markets WHERE code=?", (market,)).fetchone(), "unknown_market", "market unknown", 404)
             sources = {}
             for source in ("tickets", "telemetry"):
-                row = db.execute("SELECT count(*) batches,coalesce(sum(accepted),0) accepted,coalesce(sum(rejected),0) rejected FROM batches WHERE source=?", (source,)).fetchone()
+                row = db.execute("SELECT count(*) batches,coalesce(sum(accepted),0) accepted,coalesce(sum(rejected),0) rejected FROM batches WHERE source=? AND status!='revoked'", (source,)).fetchone()
                 sources[source] = dict(row)
             unknown = db.execute("SELECT count(*) FROM devices WHERE market=?", (market,)).fetchone()[0]
             return {"market": market, "devices": unknown, "sources": sources, "source_revision": self.store.revision(db)}
@@ -147,15 +147,15 @@ class Analytics:
             device = Catalog.device(db, device_id)
             zone = device["timezone"]
             timeline = {day: {"day": day, "device_id": device_id, "tickets_opened": [], "ticket_actions": [], "telemetry": []} for day in sorted(days)}
-            for row in db.execute("SELECT * FROM tickets WHERE device_id=? ORDER BY opened_at,id", (device_id,)):
+            for row in db.execute("SELECT t.* FROM tickets t LEFT JOIN ticket_revocations r ON r.ticket_id=t.id AND r.status='active' WHERE t.device_id=? AND r.ticket_id IS NULL ORDER BY t.opened_at,t.id", (device_id,)):
                 day = market_day(row["opened_at"], zone)
                 if day in timeline:
                     timeline[day]["tickets_opened"].append(row["id"])
-                for action in db.execute("SELECT * FROM ticket_history WHERE ticket_id=? ORDER BY revision", (row["id"],)):
+                for action in db.execute("SELECT h.* FROM ticket_history h WHERE h.ticket_id=? ORDER BY h.revision", (row["id"],)):
                     action_day = market_day(action["event_at"], zone)
                     if action_day in timeline:
                         timeline[action_day]["ticket_actions"].append({"ticket_id": row["id"], "action": action["action"], "revision": action["revision"]})
-            for row in db.execute("SELECT * FROM telemetry WHERE device_id=? ORDER BY observed_at,id", (device_id,)):
+            for row in db.execute("SELECT e.* FROM telemetry e LEFT JOIN telemetry_revocations x ON x.event_id=e.id AND x.status='active' WHERE e.device_id=? AND x.event_id IS NULL ORDER BY e.observed_at,e.id", (device_id,)):
                 day = market_day(row["observed_at"], zone)
                 if day in timeline:
                     timeline[day]["telemetry"].append({"event_id": row["id"], "run_hours": row["run_hours"], "downtime_hours": row["downtime_hours"]})
